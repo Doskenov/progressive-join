@@ -1600,6 +1600,7 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 			} else {
 				// Phase 1 progressive join is done
 				elog(INFO, "Phase 1 finished normally");
+				node->phaseTwo = true;
 				// Make sure inner relation is also at its end
 				if (!node->reachedEndOfInner) ExhaustSortNode(innerPlan);
 				return ExecMergeJoinOld(pstate);
