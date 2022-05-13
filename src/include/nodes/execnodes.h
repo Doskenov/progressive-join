@@ -1822,7 +1822,6 @@ typedef struct MergeJoinState
 	long outerPageNumber;
 	bool reachedEndOfOuter;
 	bool reachedEndOfInner;
-	int pageIndex;
 	bool phaseTwo;
 } MergeJoinState;
 

@@ -1587,7 +1587,6 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 		if (node->needOuterPage) {
 			if (!node->reachedEndOfOuter) {
 				// Load new block
-				node->pageIndex++;
 				LoadNextPage(outerPlan, node->outerPage);
 
 				// Incomplete block indicates end of relation
@@ -1604,7 +1603,6 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 				// Make sure inner relation is also at its end
 				if (!node->reachedEndOfInner) ExhaustSortNode(innerPlan);
 				return ExecMergeJoinOld(pstate);
-
 			}
 			node->needOuterPage = false;
 		}
@@ -1669,7 +1667,6 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 
 		// Check join predicates
 		if (MJEvalOuterValues(node) == MJEVAL_MATCHABLE && MJEvalInnerValues(node, innerTupleSlot) == MJEVAL_MATCHABLE) {
-			// ENL1_printf("testing qualification");
 			if (MJCompare(node) == 0) {
 				return ExecProject(node->js.ps.ps_ProjInfo);
 			}
@@ -1869,7 +1866,6 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	mergestate->outerPageNumber = outerPlan(node)->plan_rows / PAGE_SIZE + 1;;
 	mergestate->reachedEndOfOuter = false;
 	mergestate->reachedEndOfInner = false;
-	mergestate->pageIndex = -1;
 	mergestate->phaseTwo = false;
 
 	mergestate->outerPage = CreateRelationPage();
