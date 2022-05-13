@@ -1901,6 +1901,9 @@ ExecEndMergeJoin(MergeJoinState *node)
 	ExecEndNode(innerPlanState(node));
 	ExecEndNode(outerPlanState(node));
 
+	RemoveRelationPage(&(node->outerPage));
+	RemoveRelationPage(&(node->innerPage));
+
 	MJ1_printf("ExecEndMergeJoin: %s\n",
 			   "node processing ended");
 }
