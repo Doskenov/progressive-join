@@ -1545,15 +1545,11 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 	// is finished and all expected setup is finalized
 	if (node->phaseTwo) return ExecMergeJoinOld(pstate);
 
-	NestLoop *nl;
 	PlanState *innerPlan;
 	PlanState *outerPlan;
 	TupleTableSlot *outerTupleSlot;
 	TupleTableSlot *innerTupleSlot;
-	ExprState *joinqual;
-	ExprState *otherqual;
 	ExprContext *econtext;
-	ListCell *lc;
 
 	CHECK_FOR_INTERRUPTS();
 
@@ -1562,9 +1558,6 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 	 */
 	ENL1_printf("getting info from node");
 
-	nl = (NestLoop*) node->js.ps.plan;
-	joinqual = node->js.joinqual;
-	otherqual = node->js.ps.qual;
 	outerPlan = outerPlanState(node);
 	innerPlan = innerPlanState(node);
 	econtext = node->js.ps.ps_ExprContext;
@@ -1632,8 +1625,6 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 
 		// End of inner block: loop or flag to load new blocks
 		if (node->innerPage->index == node->innerPage->tupleCount) {
-			fprintf(stderr, "Outer Index: %i       Inner Index: %i\n", node->outerPage->index, node->innerPage->index);
-			// 
 			if (node->outerPage->index < node->outerPage->tupleCount - 1) {
 				node->outerPage->index++;
 				node->innerPage->index = 0;
