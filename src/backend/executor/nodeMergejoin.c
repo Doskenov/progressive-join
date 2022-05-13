@@ -1540,9 +1540,11 @@ void ExhaustSortNode(PlanState *pstate) {
 
 // Not actually merge join - progressive join
 static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
-	// fprintf(stderr, "In Merge Join\n");
 	MergeJoinState *node = castNode(MergeJoinState, pstate);
+	// Checks phase of sort and calls MergeJoin once progressive join
+	// is finished and all expected setup is finalized
 	if (node->phaseTwo) return ExecMergeJoinOld(pstate);
+
 	NestLoop *nl;
 	PlanState *innerPlan;
 	PlanState *outerPlan;
@@ -1579,14 +1581,16 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 	 */
 	ENL1_printf("entering main loop");
 
-	// if (nl->join.inner_unique)
-	// elog(WARNING, "inner relation is detected as unique");
 
 	for (;;) {
+		// Logic for aquiring new outer relation block 
 		if (node->needOuterPage) {
 			if (!node->reachedEndOfOuter) {
+				// Load new block
 				node->pageIndex++;
 				LoadNextPage(outerPlan, node->outerPage);
+
+				// Incomplete block indicates end of relation
 				if (node->outerPage->tupleCount < PAGE_SIZE) {
 					elog(INFO, "Reached end of outer");
 					node->reachedEndOfOuter = true;
@@ -1594,33 +1598,43 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 						continue;
 				}
 			} else {
-				// join is done
+				// Phase 1 progressive join is done
 				elog(INFO, "Phase 1 finished normally");
-				node->phaseTwo = true;
+				// Make sure inner relation is also at its end
 				if (!node->reachedEndOfInner) ExhaustSortNode(innerPlan);
 				return ExecMergeJoinOld(pstate);
 
 			}
 			node->needOuterPage = false;
 		}
+
+		// Logic for aquiring new inner relation block
 		if (node->needInnerPage) {
 			if (!node->reachedEndOfInner) {
+				// Load new block
 				LoadNextPage(innerPlan, node->innerPage);
+
+				// Incomplete block indicates end of relation
 				if (node->innerPage->tupleCount < PAGE_SIZE) {
 					node->reachedEndOfInner = true;
 					if (node->innerPage->tupleCount == 0)
 						continue;
 				}
 			} else {
-				// join is done
+				// Phase 1 progressive join is done
 				elog(INFO, "Phase 1 finished normally");
+				node->phaseTwo = true;
+				// Make sure outer relation is also at its end
 				if (!node->reachedEndOfOuter) ExhaustSortNode(outerPlan);
 				return ExecMergeJoinOld(pstate);
 			}
 			node->needInnerPage = false;
 		}
+
+		// End of inner block: loop or flag to load new blocks
 		if (node->innerPage->index == node->innerPage->tupleCount) {
 			fprintf(stderr, "Outer Index: %i       Inner Index: %i\n", node->outerPage->index, node->innerPage->index);
+			// 
 			if (node->outerPage->index < node->outerPage->tupleCount - 1) {
 				node->outerPage->index++;
 				node->innerPage->index = 0;
@@ -1633,6 +1647,7 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 			continue;
 		}
 
+		// Prepare for join comparison
 		outerTupleSlot = node->outerPage->tuples[node->outerPage->index];
 		econtext->ecxt_outertuple = outerTupleSlot;
 		node->mj_OuterTupleSlot = outerTupleSlot;
@@ -1648,6 +1663,7 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 			return NULL;
 		}
 
+		// Check join predicates
 		if (MJEvalOuterValues(node) == MJEVAL_MATCHABLE && MJEvalInnerValues(node, innerTupleSlot) == MJEVAL_MATCHABLE) {
 			ENL1_printf("testing qualification");
 			if (MJCompare(node) == 0 && (joinqual == NULL || ExecQual(joinqual, econtext))) {
@@ -1655,6 +1671,7 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 				node->mj_MatchedInner = true;
 				if (otherqual == NULL || ExecQual(otherqual, econtext)) {
 					ENL1_printf("qualification succeeded, projecting tuple");
+					// Return good joined tuple, else main loop
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				} else
 					InstrCountFiltered2(node, 1);

@@ -1,3 +1,9 @@
+This is the progressive merge-join hybrid branch of the idea lab join-game repository.
+
+IMPORTANT: This substantially changes the functionality of mergeJoin and nodeSort, rendering them useless for other applications.
+
+
+
 PostgreSQL Database Management System
 =====================================
 

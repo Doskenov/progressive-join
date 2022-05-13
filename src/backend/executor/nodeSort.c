@@ -85,6 +85,8 @@ ExecSort(PlanState *pstate)
 
 		outerNode = outerPlanState(node);
 		tupDesc = ExecGetResultType(outerNode);
+
+		// NEW -- Check to ensure that that the heap is only initialized once
 		if (node->init_state == 0)
 		{
 			tuplesortstate = tuplesort_begin_heap(tupDesc,
@@ -98,22 +100,28 @@ ExecSort(PlanState *pstate)
 			if (node->bounded)
 				tuplesort_set_bound(tuplesortstate, node->bound);
 			node->tuplesortstate = (void *) tuplesortstate;
+			// NEW -- State change
 			node->init_state = 1;
 		}
 		/*
 		 * Scan the subplan and feed all the tuples to tuplesort.
 		 */
+		// NEW -- Check to ensure that after the final tuple has been returned
+		// no more tuples will be returned from the sorting block
 		if  (node->init_state < 2)
 		{
 			for (;;)
 			{
 				slot = ExecProcNode(outerNode);
 
+				// NEW -- Returns final null tuple and modifies state
 				if (TupIsNull(slot)) {
 					node->init_state = 2;
 					return slot;
 				}
+
 				tuplesort_puttupleslot(tuplesortstate, slot);
+				// NEW -- returns each tuple after it is added to the sort struct
 				return slot;
 			}
 		}
