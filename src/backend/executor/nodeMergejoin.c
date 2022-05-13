@@ -1652,10 +1652,13 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 		outerTupleSlot = node->outerPage->tuples[node->outerPage->index];
 		econtext->ecxt_outertuple = outerTupleSlot;
 		node->mj_OuterTupleSlot = outerTupleSlot;
+
 		innerTupleSlot = node->innerPage->tuples[node->innerPage->index];
 		econtext->ecxt_innertuple = innerTupleSlot;
 		node->mj_InnerTupleSlot = innerTupleSlot;
+
 		node->innerPage->index++;
+		
 		if (TupIsNull(innerTupleSlot)) {
 			elog(WARNING, "inner tuple is null");
 			return NULL;
@@ -1666,18 +1669,10 @@ static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
 
 		// Check join predicates
 		if (MJEvalOuterValues(node) == MJEVAL_MATCHABLE && MJEvalInnerValues(node, innerTupleSlot) == MJEVAL_MATCHABLE) {
-			ENL1_printf("testing qualification");
-			if (MJCompare(node) == 0 && (joinqual == NULL || ExecQual(joinqual, econtext))) {
-				node->mj_MatchedOuter = true;
-				node->mj_MatchedInner = true;
-				if (otherqual == NULL || ExecQual(otherqual, econtext)) {
-					ENL1_printf("qualification succeeded, projecting tuple");
-					// Return good joined tuple, else main loop
-					return ExecProject(node->js.ps.ps_ProjInfo);
-				} else
-					InstrCountFiltered2(node, 1);
-			} else
-				InstrCountFiltered1(node, 1);
+			// ENL1_printf("testing qualification");
+			if (MJCompare(node) == 0) {
+				return ExecProject(node->js.ps.ps_ProjInfo);
+			}
 		}
 		ResetExprContext(econtext); ENL1_printf("qualification failed, looping");
 	}
