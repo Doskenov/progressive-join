@@ -110,20 +110,17 @@ ExecSort(PlanState *pstate)
 		// no more tuples will be returned from the sorting block
 		if  (node->init_state < 2)
 		{
-			for (;;)
-			{
-				slot = ExecProcNode(outerNode);
+			slot = ExecProcNode(outerNode);
 
-				// NEW -- Returns final null tuple and modifies state
-				if (TupIsNull(slot)) {
-					node->init_state = 2;
-					return slot;
-				}
-
-				tuplesort_puttupleslot(tuplesortstate, slot);
-				// NEW -- returns each tuple after it is added to the sort struct
+			// NEW -- Returns final null tuple and modifies state
+			if (TupIsNull(slot)) {
+				node->init_state = 2;
 				return slot;
 			}
+
+			tuplesort_puttupleslot(tuplesortstate, slot);
+			// NEW -- returns each tuple after it is added to the sort struct
+			return slot;
 		}
 		/*
 		 * Complete the sort.
