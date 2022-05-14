@@ -1528,6 +1528,7 @@ ExecMergeJoinOld(PlanState *pstate)
 	}
 }
 
+// Takes node and calls execprocnode until it returns NULL
 void ExhaustSortNode(PlanState *pstate) {
 	TupleTableSlot *temp;
 	temp = ExecProcNode(pstate);
@@ -1539,7 +1540,7 @@ void ExhaustSortNode(PlanState *pstate) {
 }
 
 // Not actually merge join - progressive join
-static TupleTableSlot* ExecMergeJoin(PlanState *pstate) {
+static TupleTableSlot* ExecProgressiveJoin(PlanState *pstate) {
 	MergeJoinState *node = castNode(MergeJoinState, pstate);
 	// Checks phase of sort and calls MergeJoin once progressive join
 	// is finished and all expected setup is finalized
@@ -1689,7 +1690,7 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	mergestate = makeNode(MergeJoinState);
 	mergestate->js.ps.plan = (Plan *) node;
 	mergestate->js.ps.state = estate;
-	mergestate->js.ps.ExecProcNode = ExecMergeJoin;
+	mergestate->js.ps.ExecProcNode = ExecProgressiveJoin;
 	mergestate->js.jointype = node->join.jointype;
 	mergestate->mj_ConstFalseJoin = false;
 
