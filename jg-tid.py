@@ -48,23 +48,24 @@ def measureTimeForKs(conn, joinQuery):
 	print("start time",start)
 	cur.execute(joinQuery)
 	print('  time before fetch: %f sec' % (time() - start))
-	fetched = 0
+	fetched = int(0)
 	start = time()
 	# prev = start
 	# factor = sigma
 	# weightedTime = 0
 	res = list()
-	for fetch in cur:
+	barrier = int(2)
+	for _ in cur:
 		fetched += 1
-		current = time()
 		# weightedTime += (current-prev)*factor
 		# prev = current
 		# factor *= sigma
-		if fetched in [20,50,100,500,1000,2000,30000,60000,120000,240000,500000,1000000]:
-			joinTime = current - start
-			print(fetched,joinTime)
-			
+		if fetched == barrier:
+			barrier *= 2
+			joinTime = time() - start
+			print("%d,%f\n"%(fetched,joinTime))
 	joinTime = time() - start
+	print("%d,%f\n"%(fetched,joinTime))
 	print('  time %.2f sec' % (joinTime))
 	res.append(joinTime * 1000)
 	print(joinTime)
