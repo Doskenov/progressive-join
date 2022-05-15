@@ -1,4 +1,5 @@
 # !/bin/python
+from fileinput import filename
 import psycopg2
 import re
 from time import time
@@ -9,25 +10,28 @@ def main():
 
 	# python filename
 	# sigma = float(sys.argv[1])
+	filename = str(sys.argv[1])
 
-	joinQueries = [ "select o_orderkey, l_orderkey from orders2_s0_5_z0 join lineitem_s0_5_z2 on o_orderkey = l_orderkey",
-					"select p_partkey, l_partkey from part_s0_5_z2, lineitem_s0_5_z2 where p_partkey = l_partkey;",
-					"select s_suppkey, l_suppkey from supplier_s1_z0_5, lineitem_s0_5_z2 where s_suppkey= l_suppkey;"]
+	joinQueries = [ "select o_orderkey, l_orderkey from orderslg join lineitemlg on o_orderkey = l_orderkey",
+					"select p_partkey, l_partkey from partlg, lineitemlg where p_partkey = l_partkey;",
+					"select s_suppkey, l_suppkey from supplierlg, lineitemlg where s_suppkey= l_suppkey;"]
 
 		
 	conn = psycopg2.connect(host="/tmp/", database="popowskm", user="popowskm", port="5450")
-	print("connect successfully",conn)
+	f = open(filename, 'w+')
+	# f.write("connect successfully",conn)
 
 	loop = 1 
 	for joinQuery in joinQueries:
 		for _ in range(loop):
-			timeForKs = measureTimeForKs(conn, joinQuery)
+			timeForKs = measureTimeForKs(conn, joinQuery, f)
+	f.close()
 
 
 # measures the running time of a join query for a given value of k 
-def measureTimeForKs(conn, joinQuery):
+def measureTimeForKs(conn, joinQuery, f):
 	cur = conn.cursor()
-	print("Progressive-Merge Join")
+	f.write("Progressive-Merge Join")
 	cur.execute('set enable_material=off;')
 	cur.execute('set max_parallel_workers_per_gather=0;')
 	cur.execute('set enable_hashjoin=off;')
@@ -44,10 +48,10 @@ def measureTimeForKs(conn, joinQuery):
 	cur.itersize = 1
 
 	start = time()
-	print(joinQuery)
-	print("start time",start)
+	f.write(joinQuery)
+	# f.write("start time",start)
 	cur.execute(joinQuery)
-	print('  time before fetch: %f sec' % (time() - start))
+	f.write('  time before fetch: %f sec' % (time() - start))
 	fetched = int(0)
 	start = time()
 	# prev = start
@@ -63,12 +67,12 @@ def measureTimeForKs(conn, joinQuery):
 		if fetched == barrier:
 			barrier *= 2
 			joinTime = time() - start
-			print("%d,%f\n"%(fetched,joinTime))
+			f.write("%d,%f\n"%(fetched,joinTime))
 	joinTime = time() - start
-	print("%d,%f\n"%(fetched,joinTime))
-	print('  time %.2f sec' % (joinTime))
+	f.write("%d,%f\n"%(fetched,joinTime))
+	f.write('  time %.2f sec' % (joinTime))
 	res.append(joinTime * 1000)
-	print(joinTime)
+	f.write("%f"%joinTime)
 	cur.close()
 
 	return res
