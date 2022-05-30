@@ -1709,7 +1709,7 @@ typedef struct JoinState
  * ----------------
  */
 
-#define PAGE_SIZE 4
+#define PAGE_SIZE 32
 typedef struct RelationPage {
 	TupleTableSlot* tuples[PAGE_SIZE];
 	int index;
