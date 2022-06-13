@@ -95,6 +95,7 @@
 #include "postgres.h"
 
 #include <limits.h>
+#include <math.h>
 
 #include "access/htup_details.h"
 #include "access/nbtree.h"
@@ -464,6 +465,12 @@ struct Tuplesortstate
 #ifdef TRACE_SORT
 	PGRUsage	ru_start;
 #endif
+
+	// ****************** New Stuff
+	bool primaryMerge;
+	int primaryMergeCounter;
+	int destTapeNumber;
+
 };
 
 /*
@@ -647,6 +654,8 @@ static void worker_freeze_result_tape(Tuplesortstate *state);
 static void worker_nomergeruns(Tuplesortstate *state);
 static void leader_takeover_tapes(Tuplesortstate *state);
 static void free_sort_tuple(Tuplesortstate *state, SortTuple *stup);
+static void rotateTapes(Tuplesortstate *state);
+static void swapTapes(Tuplesortstate *state);
 
 /*
  * Special versions of qsort just for SortTuple objects.  qsort_tuple() sorts
@@ -2380,6 +2389,10 @@ tuplesort_merge_order(int64 allowedMem)
 	mOrder = Max(mOrder, MINORDER);
 	mOrder = Min(mOrder, MAXORDER);
 
+	// NEW ************************************
+	// Hardcoded value
+	mOrder = 63;
+
 	return mOrder;
 }
 
@@ -2477,10 +2490,12 @@ inittapestate(Tuplesortstate *state, int maxTapes)
 	state->tp_dummy = (int *) palloc0(maxTapes * sizeof(int));
 	state->tp_tapenum = (int *) palloc0(maxTapes * sizeof(int));
 
+	
+
 	/* Record # of tapes allocated (for duration of sort) */
 	state->maxTapes = maxTapes;
 	/* Record maximum # of tapes usable as inputs when merging */
-	state->tapeRange = maxTapes - 1;
+	state->tapeRange = maxTapes / 2;
 }
 
 /*
@@ -2560,12 +2575,11 @@ init_slab_allocator(Tuplesortstate *state, int numSlots)
 static void
 mergeruns(Tuplesortstate *state)
 {
-	int			tapenum,
-				svTape,
-				svRuns,
-				svDummy;
-	int			numTapes;
+	int			tapenum;
 	int			numInputTapes;
+	bool cont;
+	int i;
+	bool check;
 
 	Assert(state->status == TSS_BUILDRUNS);
 	Assert(state->memtupcount == 0);
@@ -2610,17 +2624,7 @@ mergeruns(Tuplesortstate *state)
 	 * tape numbers of the used tapes are not consecutive, and you cannot just
 	 * loop from 0 to numTapes to visit all used tapes!
 	 */
-	if (state->Level == 1)
-	{
-		numInputTapes = state->currentRun;
-		numTapes = numInputTapes + 1;
-		FREEMEM(state, (state->maxTapes - numTapes) * TAPE_BUFFER_OVERHEAD);
-	}
-	else
-	{
-		numInputTapes = state->tapeRange;
-		numTapes = state->maxTapes;
-	}
+	numInputTapes = state->tapeRange;
 
 	/*
 	 * Initialize the slab allocator.  We need one slab slot per input tape,
@@ -2632,7 +2636,7 @@ mergeruns(Tuplesortstate *state)
 	 * to track memory usage of individual tuples.
 	 */
 	if (state->tuples)
-		init_slab_allocator(state, numInputTapes + 1);
+		init_slab_allocator(state, numInputTapes + 1 + 2);
 	else
 		init_slab_allocator(state, 0);
 
@@ -2670,89 +2674,43 @@ mergeruns(Tuplesortstate *state)
 	/* End of step D2: rewind all output tapes to prepare for merging */
 	for (tapenum = 0; tapenum < state->tapeRange; tapenum++)
 		LogicalTapeRewindForRead(state->tapeset, tapenum, state->read_buffer_size);
+	
+	// To preserve recursive looping nature of calls. For all but the first iteration, the primary
+	// tape will already be in read mode.
+	LogicalTapeRewindForRead(state->tapeset, state->tapeRange + 1, state->read_buffer_size);
 
 	for (;;)
 	{
-		/*
-		 * At this point we know that tape[T] is empty.  If there's just one
-		 * (real or dummy) run left on each input tape, then only one merge
-		 * pass remains.  If we don't have to produce a materialized sorted
-		 * tape, we can stop at this point and do the final merge on-the-fly.
-		 */
-		if (!state->randomAccess && !WORKER(state))
+		// Init primary merge
+		state->primaryMerge = true;
+		state->primaryMergeCounter = 0;
+		// Loops until first input tape is empty
+		check = true;
+		while (check)
 		{
-			bool		allOneRun = true;
-
-			Assert(state->tp_runs[state->tapeRange] == 0);
-			for (tapenum = 0; tapenum < state->tapeRange; tapenum++)
-			{
-				if (state->tp_runs[tapenum] + state->tp_dummy[tapenum] != 1)
-				{
-					allOneRun = false;
+			swapTapes(state);
+			mergeonerun(state);
+			check = false;
+			for (i = 0; i < state->tapeRange; i++) {
+				if (state->tp_runs[i]) {
+					check = true;
 					break;
 				}
 			}
-			if (allOneRun)
-			{
-				/* Tell logtape.c we won't be writing anymore */
-				LogicalTapeSetForgetFreeSpace(state->tapeset);
-				/* Initialize for the final merge pass */
-				beginmerge(state);
-				state->status = TSS_FINALMERGE;
-				return;
+		}
+		elog(INFO, "One cycle completed.");
+		// Check to see if algorithm is complete. All but primary run output
+		// should be empty
+		cont = false;
+		for(i=state->tapeRange + 1; i < state->maxTapes; i++) {
+			if (state->tp_runs[i]) {
+				cont = true;
+				break;
 			}
 		}
-
-		/* Step D5: merge runs onto tape[T] until tape[P] is empty */
-		while (state->tp_runs[state->tapeRange - 1] ||
-			   state->tp_dummy[state->tapeRange - 1])
-		{
-			bool		allDummy = true;
-
-			for (tapenum = 0; tapenum < state->tapeRange; tapenum++)
-			{
-				if (state->tp_dummy[tapenum] == 0)
-				{
-					allDummy = false;
-					break;
-				}
-			}
-
-			if (allDummy)
-			{
-				state->tp_dummy[state->tapeRange]++;
-				for (tapenum = 0; tapenum < state->tapeRange; tapenum++)
-					state->tp_dummy[tapenum]--;
-			}
-			else
-				mergeonerun(state);
-		}
-
-		/* Step D6: decrease level */
-		if (--state->Level == 0)
-			break;
-		/* rewind output tape T to use as new input */
-		LogicalTapeRewindForRead(state->tapeset, state->tp_tapenum[state->tapeRange],
-								 state->read_buffer_size);
-		/* rewind used-up input tape P, and prepare it for write pass */
-		LogicalTapeRewindForWrite(state->tapeset, state->tp_tapenum[state->tapeRange - 1]);
-		state->tp_runs[state->tapeRange - 1] = 0;
-
-		/*
-		 * reassign tape units per step D6; note we no longer care about A[]
-		 */
-		svTape = state->tp_tapenum[state->tapeRange];
-		svDummy = state->tp_dummy[state->tapeRange];
-		svRuns = state->tp_runs[state->tapeRange];
-		for (tapenum = state->tapeRange; tapenum > 0; tapenum--)
-		{
-			state->tp_tapenum[tapenum] = state->tp_tapenum[tapenum - 1];
-			state->tp_dummy[tapenum] = state->tp_dummy[tapenum - 1];
-			state->tp_runs[tapenum] = state->tp_runs[tapenum - 1];
-		}
-		state->tp_tapenum[0] = svTape;
-		state->tp_dummy[0] = svDummy;
-		state->tp_runs[0] = svRuns;
+		if (!cont) break;
+		// Set tapes to same initial state, but partially merged
+		rotateTapes(state);
 	}
 
 	/*
@@ -2763,37 +2721,116 @@ mergeruns(Tuplesortstate *state)
 	 * output tape while rewinding it.  The last iteration of step D6 would be
 	 * a waste of cycles anyway...
 	 */
+	elog(INFO, "One sort completed.");
+	// Designate final result tape
 	state->result_tape = state->tp_tapenum[state->tapeRange];
+	// Freeze result tape
 	if (!WORKER(state))
 		LogicalTapeFreeze(state->tapeset, state->result_tape, NULL);
 	else
 		worker_freeze_result_tape(state);
+	// Set state machine
 	state->status = TSS_SORTEDONTAPE;
 
 	/* Release the read buffers of all the other tapes, by rewinding them. */
-	for (tapenum = 0; tapenum < state->maxTapes; tapenum++)
+	for (tapenum = 0; tapenum < state->tapeRange; tapenum++)
 	{
 		if (tapenum != state->result_tape)
 			LogicalTapeRewindForWrite(state->tapeset, tapenum);
 	}
 }
 
+
+// Progressive Merge Structure is [0...(tapeRange-1)] = input tapes
+// tapeRange = output for primary run
+// Only during primary merge, (tapeRange+1) holds primary run for input
+// [tapeRange..(tapeRange*2-1)] = output tapes
+
+// Swaps tapeRange and tapeRange + 1, so the tapes match algorithm expecations 
+static void swapTapes(Tuplesortstate *state)
+{
+	int			svTape,
+				svRuns;
+	// Return if performing normal merge
+	if (!state->primaryMerge) {
+		return;
+	}
+	else {
+		/* rewind output tape T to use as new input */
+		LogicalTapeRewindForRead(state->tapeset, state->tp_tapenum[state->tapeRange],
+								 state->read_buffer_size);
+		/* rewind used-up input tape P, and prepare it for write pass */
+		LogicalTapeRewindForWrite(state->tapeset, state->tp_tapenum[state->tapeRange + 1]);
+		state->tp_runs[state->tapeRange + 1] = 0;
+
+		svTape = state->tp_tapenum[state->tapeRange];
+		svRuns = state->tp_runs[state->tapeRange];
+		
+		state->tp_tapenum[state->tapeRange] = state->tp_tapenum[state->tapeRange + 1];
+		state->tp_runs[state->tapeRange] = state->tp_runs[state->tapeRange + 1];
+
+		state->tp_tapenum[state->tapeRange + 1] = svTape;
+		state->tp_runs[state->tapeRange + 1] = svRuns;
+	}
+}
+
+// Swaps input and output tapes, input 0 <-> output 0, maintaining order
+static void rotateTapes(Tuplesortstate *state) {
+	int			tapenum,
+				svTape,
+				svRuns;
+	for (tapenum = 0; tapenum < state->tapeRange; tapenum++)
+	{
+		/* rewind output tape T to use as new input */
+		if (!(state->primaryMerge && tapenum + state->tapeRange == 33)) {
+			LogicalTapeRewindForRead(state->tapeset, state->tp_tapenum[tapenum + state->tapeRange],
+								state->read_buffer_size);
+		}
+		/* rewind used-up input tape P, and prepare it for write pass */
+		LogicalTapeRewindForWrite(state->tapeset, state->tp_tapenum[tapenum]);
+		state->tp_runs[tapenum] = 0;
+		svTape = state->tp_tapenum[tapenum];
+		svRuns = state->tp_runs[tapenum];
+
+		state->tp_tapenum[tapenum] = state->tp_tapenum[tapenum + state->tapeRange];
+		state->tp_runs[tapenum] = state->tp_runs[tapenum + state->tapeRange];
+
+		state->tp_tapenum[tapenum + state->tapeRange] = svTape;
+		state->tp_runs[tapenum + state->tapeRange] = svRuns;	
+	}
+	// Set tape that is supposed to contain primary run to read, preserve recursion.
+	LogicalTapeRewindForRead(state->tapeset, state->tp_tapenum[state->tapeRange + 1],
+							state->read_buffer_size);
+}
+
+
+
+
 /*
- * Merge one run from each input tape, except ones with dummy runs.
- *
- * This is the inner loop of Algorithm D step D5.  We know that the
- * output tape is TAPE[T].
+ * Merge one run from each selected input tape
  */
 static void
 mergeonerun(Tuplesortstate *state)
 {
-	int			destTape = state->tp_tapenum[state->tapeRange];
-	int			srcTape;
+	int			srcTape,
+				destTape;
 
+	// Decides which output tape to use for the run.
+	if(!state->primaryMerge) {
+		state->destTapeNumber++;
+		if (state->destTapeNumber == state->maxTapes) {
+			state->destTapeNumber = state->tapeRange;
+		}
+	}
+	else {
+		state->destTapeNumber = state->tapeRange;
+	}
+	// Sets tape based on selection
+	destTape = state->tp_tapenum[state->destTapeNumber];
 	/*
-	 * Start the merge by loading one tuple from each active source tape into
-	 * the heap.  We can also decrease the input run/dummy run counts.
-	 */
+	* Start the merge by loading one tuple from each active source tape into
+	* the heap.  We can also decrease the input run counts.
+	*/
 	beginmerge(state);
 
 	/*
@@ -2807,7 +2844,12 @@ mergeonerun(Tuplesortstate *state)
 
 		/* write the tuple to destTape */
 		srcTape = state->memtuples[0].tupindex;
+
 		WRITETUP(state, destTape, &state->memtuples[0]);
+
+		// Here is where a tuple would be copied, I think
+		// The tuple is located at state->memtuples[0]
+		// Store until the end of the loop in a new variable, then return?
 
 		/* recycle the slot of the tuple we just wrote out, for the next read */
 		if (state->memtuples[0].tuple)
@@ -2819,12 +2861,21 @@ mergeonerun(Tuplesortstate *state)
 		 */
 		if (mergereadnext(state, srcTape, &stup))
 		{
+			// Set source tape in temporary tuple metadata, to allow for later replacement
 			stup.tupindex = srcTape;
 			tuplesort_heap_replace_top(state, &stup);
-
 		}
 		else
 			tuplesort_heap_delete_top(state);
+	}
+	// Increase primary mergecounter and if primary merge is complete, set old primary merge input
+	// tape to output tape. (SwapTapes won't do anything if primaryMerge is false)
+	if (state->primaryMerge) {
+		if (pow(2, state->primaryMergeCounter + 1) >= state->tapeRange){
+			state->primaryMerge = false;
+			LogicalTapeRewindForWrite(state->tapeset, state->tp_tapenum[state->tapeRange + 1]);
+		}
+		state->primaryMergeCounter++;
 	}
 
 	/*
@@ -2854,6 +2905,9 @@ beginmerge(Tuplesortstate *state)
 	int			activeTapes;
 	int			tapenum;
 	int			srcTape;
+	
+	int min;
+	int max;
 
 	/* Heap should be empty here */
 	Assert(state->memtupcount == 0);
@@ -2862,10 +2916,35 @@ beginmerge(Tuplesortstate *state)
 	memset(state->mergeactive, 0,
 		   state->maxTapes * sizeof(*state->mergeactive));
 	activeTapes = 0;
-	for (tapenum = 0; tapenum < state->tapeRange; tapenum++)
+
+	// We will only use a small portion of tapes for primary run input
+	if (state->primaryMerge) {
+		// Build primary run
+		if (state->primaryMergeCounter == 0) {
+			min = 0;
+			max = 2;
+		}
+		// Select subset of input tapes for progressive merge
+		else {
+			min = pow(2, state->primaryMergeCounter);
+			max = pow(2, state->primaryMergeCounter + 1);
+			// Add primary run to merge
+			state->tp_runs[state->tapeRange+1]--;
+			srcTape = state->tp_tapenum[state->tapeRange+1];
+			state->mergeactive[srcTape] = true;
+			activeTapes++;
+		}
+	}
+	// Normal merge
+	else {
+		min = 0;
+		max = state->tapeRange;
+	}
+	// Go through all selected tapes and set the tape to active
+	// if there are any runs left on that tape.
+	for (tapenum = min; tapenum < max; tapenum++)
 	{
-		if (state->tp_dummy[tapenum] > 0)
-			state->tp_dummy[tapenum]--;
+		if (state->tp_runs[tapenum] == 0) continue;
 		else
 		{
 			Assert(state->tp_runs[tapenum] > 0);
@@ -2875,6 +2954,7 @@ beginmerge(Tuplesortstate *state)
 			activeTapes++;
 		}
 	}
+
 	Assert(activeTapes > 0);
 	state->activeTapes = activeTapes;
 
